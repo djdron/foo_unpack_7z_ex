@@ -13,6 +13,7 @@ include_directories("${FOOBAR_SDK_ROOT}/foobar2000")
 endif()
 
 include_directories(".")
+add_definitions(-DEXTRACT_ONLY -D_7ZIP_ST)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4018 /wd4244 /wd4800 /wd4996")
 set(CMAKE_C_FLAGS "${CMAKE_CXX_FLAGS} /wd4018 /wd4090")
@@ -48,8 +49,9 @@ file(GLOB SRCS_CXX_7Z_7ZIP_COMPRESS "7z/CPP/7zip/Compress/*.cpp")
 file(GLOB SRCS_H_7Z_7ZIP_COMPRESS "7z/CPP/7zip/Compress/*.h")
 source_group("7z\\cpp\\7zip\\compress" FILES ${SRCS_CXX_7Z_7ZIP_COMPRESS} ${SRCS_H_7Z_7ZIP_COMPRESS})
 
+file(GLOB SRCS_CXX_7Z_7ZIP_ARCHIVE "7z/CPP/7zip/Archive/*.cpp")
 file(GLOB SRCS_H_7Z_7ZIP_ARCHIVE "7z/CPP/7zip/Archive/*.h")
-source_group("7z\\cpp\\7zip\\archive" FILES ${SRCS_H_7Z_7ZIP_ARCHIVE})
+source_group("7z\\cpp\\7zip\\archive" FILES ${SRCS_CXX_7Z_7ZIP_ARCHIVE} ${SRCS_H_7Z_7ZIP_ARCHIVE})
 
 file(GLOB SRCS_CXX_7Z_7ZIP_ARCHIVE_7Z "7z/CPP/7zip/Archive/7z/*.cpp")
 file(GLOB SRCS_H_7Z_7ZIP_ARCHIVE_7Z "7z/CPP/7zip/Archive/7z/*.h")
