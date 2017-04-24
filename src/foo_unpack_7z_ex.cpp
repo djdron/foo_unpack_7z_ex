@@ -38,12 +38,6 @@ std::string FileName(const FString& _name_wide)
 
 using namespace NWindows;
 
-static void PrintError(const char *message)
-{
-	assert(message);
-	throw exception_io_data();
-}
-
 static HRESULT IsArchiveItemProp(IInArchive *archive, UInt32 index, PROPID propID, bool &result)
 {
 	NCOM::CPropVariant prop;
@@ -88,7 +82,7 @@ public:
 
 	struct IItemProc
 	{
-		virtual void OnOk(const char* name, const t_filestats& stat, const std::string& data) = 0;
+		virtual bool OnOk(const char* name, const t_filestats& stat, const std::string& data) = 0;
 	};
 
 	MY_UNKNOWN_IMP1(ICryptoGetTextPassword)
@@ -161,38 +155,22 @@ STDMETHODIMP CArchiveExtractCallback::GetStream(UInt32 index,
 
 STDMETHODIMP CArchiveExtractCallback::SetOperationResult(Int32 operationResult)
 {
-	switch(operationResult)
+	if(operationResult == NArchive::NExtract::NOperationResult::kOK && item_proc && fi.index != -1)
 	{
-	case NArchive::NExtract::NOperationResult::kOK:
-		break;
-	default:
-		switch(operationResult)
-		{
-		case NArchive::NExtract::NOperationResult::kUnsupportedMethod:	break;
-		case NArchive::NExtract::NOperationResult::kCRCError:			break;
-		case NArchive::NExtract::NOperationResult::kDataError:			break;
-		case NArchive::NExtract::NOperationResult::kUnavailable:		break;
-		case NArchive::NExtract::NOperationResult::kUnexpectedEnd:		break;
-		case NArchive::NExtract::NOperationResult::kDataAfterEnd:		break;
-		case NArchive::NExtract::NOperationResult::kIsNotArc:			break;
-		case NArchive::NExtract::NOperationResult::kHeadersError:		break;
-		}
-		PrintError("Operation error");
-	}
-	if(item_proc && fi.index != -1)
-	{
+		int idx = fi.index;
+		fi.index = -1;
 		FString n;
 		NCOM::CPropVariant prop;
-		archive->GetProperty(fi.index, kpidPath, &prop);
+		archive->GetProperty(idx, kpidPath, &prop);
 		if(prop.vt == VT_BSTR)
 			n = prop.bstrVal;
 		auto name = FileName(n);
 		if(!name.empty())
 		{
-			auto stat = Stat(fi.index);
-			item_proc->OnOk(name.c_str(), stat, file_data);
+			auto stat = Stat(idx);
+			if(!item_proc->OnOk(name.c_str(), stat, file_data))
+				return E_ABORT;
 		}
-		fi.index = -1;
 	}
 	return S_OK;
 }
@@ -247,8 +225,7 @@ public:
 		case STREAM_SEEK_SET:	m_file->seek_ex(offset, file::seek_from_beginning, m_abort);	break;
 		case STREAM_SEEK_CUR:	m_file->seek_ex(offset, file::seek_from_current, m_abort);		break;
 		case STREAM_SEEK_END:	m_file->seek_ex(offset, file::seek_from_eof, m_abort);			break;
-		default:
-			throw exception_io_seek_out_of_range();
+		default: return S_FALSE;
 		}
 		if(newPosition)
 			*newPosition = m_file->get_position(m_abort);
@@ -267,7 +244,7 @@ class Archive7Z : public NArchive::N7z::CHandler
 {
 	typedef NArchive::N7z::CHandler inherited;
 public:
-	Archive7Z(service_ptr_t< file >& file, abort_callback & p_abort)
+	Archive7Z(const service_ptr_t< file >& file, abort_callback & p_abort)
 		: ifs(new CInFoobarStream(file, p_abort)), aoc(new CArchiveOpenCallback)
 		, aec(new CArchiveExtractCallback(this))
 	{
@@ -314,11 +291,6 @@ private:
 			case VT_BSTR:
 				if(prop.bstrVal == name)
 					return i;
-				break;
-			case VT_EMPTY:
-				break;
-			default:
-				PrintError("ERROR!");
 				break;
 			}
 		}
@@ -377,15 +349,14 @@ public:
 				: owner(_owner), p_out(_p_out), path(_path), is_remote(_is_remote)
 			{
 			}
-			virtual void OnOk(const char* name, const t_filestats& stat, const std::string& data)
+			virtual bool OnOk(const char* name, const t_filestats& stat, const std::string& data)
 			{
 				service_ptr_t<file> m_out_file;
 				if(data.size())
 					m_out_file = new service_impl_t<reader_membuffer_simple>(data.data(), data.size(), stat.m_timestamp, is_remote);
 				pfc::string8_fastalloc m_path;
 				owner->make_unpack_path(m_path, path.c_str(), name);
-				if(!p_out.on_entry(owner, m_path, stat, m_out_file))
-					PrintError("Stop");
+				return p_out.on_entry(owner, m_path, stat, m_out_file);
 			}
 			bool is_remote;
 			archive_impl* owner;
@@ -399,45 +370,57 @@ public:
 
 class unpacker_7z_ex : public unpacker
 {
-	inline bool skip_ext( const char * p )
-	{
-		static const char * exts[] = { "txt", "nfo", "info", "diz" };
-		pfc::string_extension ext( p );
-		for ( unsigned n = 0; n < tabsize( exts ); ++n )
-		{
-			if ( ! stricmp_utf8( ext, exts[ n ] ) ) return true;
-		}
-		return false;
-	}
-
 public:
-	virtual void open( service_ptr_t< file > & p_out, const service_ptr_t< file > & p_source, abort_callback & p_abort )
+	virtual void open(service_ptr_t<file>& p_out, const service_ptr_t<file>& p_source, abort_callback& p_abort )
 	{
-		if ( p_source.is_empty() ) throw exception_io_data();
+		if(p_source.is_empty()) throw exception_io_data();
 
-/*		foobar_File_Reader in( p_source, p_abort );
-		Zip7_Extractor ex;
-		handle_error( ex.open( &in ) );
-		while ( ! ex.done() )
+		Archive7Z archive(p_source, p_abort);
+
+		struct CItemProc : public CArchiveExtractCallback::IItemProc
 		{
-			handle_error( ex.stat() );
-			if ( ! skip_ext( ex.name() ) )
+			CItemProc(service_ptr_t<file>& _p_out, bool _is_remote)
+				: p_out(_p_out), is_remote(_is_remote)
 			{
-				const void * data;
-				handle_error( ex.data( &data ) );
-				p_out = new service_impl_t<reader_membuffer_simple>( data, (t_size)ex.size(), p_source->get_timestamp( p_abort ), p_source->is_remote() );
-				return;
 			}
-			handle_error( ex.next() );
-		}
-		throw exception_io_data();
-*/
+			inline bool skip_ext(const char * p)
+			{
+				static const char * exts[] = { "txt", "nfo", "info", "diz" };
+				pfc::string_extension ext(p);
+				for(unsigned n = 0; n < tabsize(exts); ++n)
+				{
+					if(!stricmp_utf8(ext, exts[n])) return true;
+				}
+				return false;
+			}
+			virtual bool OnOk(const char* name, const t_filestats& stat, const std::string& data)
+			{
+				if(data.size() && !skip_ext(name))
+				{
+					p_out = new service_impl_t<reader_membuffer_simple>(data.data(), data.size(), stat.m_timestamp, is_remote);
+					return false; // finish processing archive items
+				}
+				return true;
+			}
+			bool is_remote;
+			service_ptr_t<file>& p_out;
+		};
+		CItemProc proc(p_out, p_source->is_remote());
+		archive.Process(&proc, false);
+		if(p_out.is_empty())
+			throw exception_io_data();
 	}
 };
 
 static archive_factory_t < archive_7z_ex >  g_archive_7z_ex_factory;
 static unpacker_factory_t< unpacker_7z_ex > g_unpacker_7z_ex_factory;
 
-DECLARE_COMPONENT_VERSION("7-ZIP Reader Ex", "0.01", "(C) 2017 djdron");
+DECLARE_COMPONENT_VERSION("7-ZIP Reader Ex", "0.01",
+"7-ZIP Reader Ex (C) 2017 by djdron\n"
+"https://github.com/djdron/foo_unpack_7z_ex\n\n"
+"Used C++ LZMA API which made possible to process huge solid archives\n"
+"LZMA SDK (C) 1999 - 2016 Igor Pavlov\n"
+"http://www.7-zip.org/sdk.html\n"
+);
 DECLARE_FILE_TYPE_EX("7Z", "7-Zip Archive", "7-Zip Archives");
 VALIDATE_COMPONENT_FILENAME("foo_unpack_7z_ex.dll");
