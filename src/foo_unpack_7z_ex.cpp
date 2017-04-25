@@ -78,7 +78,7 @@ class CArchiveExtractCallback :
 	public CMyUnknownImp
 {
 public:
-	CArchiveExtractCallback(IInArchive* _archive) : archive(_archive), item_proc(NULL) {}
+	CArchiveExtractCallback(IInArchive* _archive) : archive(_archive), item_proc(NULL), file_index(-1) {}
 
 	struct IItemProc
 	{
@@ -105,22 +105,14 @@ public:
 			*processedSize = size;
 		return S_OK;
 	}
-
 	t_filestats Stat(UInt32 idx);
 
-	std::string file_data;
-
-	IItemProc* item_proc;
+	std::string	file_data;
+	IItemProc*	item_proc;
 
 private:
-	IInArchive* archive;
-	struct CProcessedFileInfo
-	{
-		CProcessedFileInfo() : index(-1), size(0) { time.dwLowDateTime = time.dwHighDateTime = 0; }
-		UInt32 index;
-		UInt64 size;
-		FILETIME time;
-	} fi;
+	IInArchive*	archive;
+	UInt32		file_index;
 };
 
 
@@ -128,7 +120,7 @@ STDMETHODIMP CArchiveExtractCallback::GetStream(UInt32 index,
 	ISequentialOutStream **outStream, Int32 askExtractMode)
 {
 	*outStream = NULL;
-	fi.index = -1;
+	file_index = -1;
 
 	if(askExtractMode != NArchive::NExtract::NAskMode::kExtract)
 		return S_OK;
@@ -138,15 +130,15 @@ STDMETHODIMP CArchiveExtractCallback::GetStream(UInt32 index,
 	if(is_dir)
 		return S_OK;
 
-	fi.index = index;
+	file_index = index;
 	// Get Size
 	NCOM::CPropVariant prop;
 	RINOK(archive->GetProperty(index, kpidSize, &prop));
-	fi.size = 0;
-	ConvertPropVariantToUInt64(prop, fi.size);
+	UInt64 file_size = 0;
+	ConvertPropVariantToUInt64(prop, file_size);
 
 	file_data.clear();
-	file_data.reserve(fi.size);
+	file_data.reserve(file_size);
 	*outStream = this;
 	AddRef(); //WTF???
 
@@ -155,10 +147,10 @@ STDMETHODIMP CArchiveExtractCallback::GetStream(UInt32 index,
 
 STDMETHODIMP CArchiveExtractCallback::SetOperationResult(Int32 operationResult)
 {
-	if(operationResult == NArchive::NExtract::NOperationResult::kOK && item_proc && fi.index != -1)
+	if(operationResult == NArchive::NExtract::NOperationResult::kOK && item_proc && file_index != -1)
 	{
-		int idx = fi.index;
-		fi.index = -1;
+		int idx = file_index;
+		file_index = -1;
 		FString n;
 		NCOM::CPropVariant prop;
 		archive->GetProperty(idx, kpidPath, &prop);
@@ -260,13 +252,14 @@ public:
 		inherited::Extract(NULL, -1, false, aec);
 		aec->item_proc = NULL;
 	}
-	void Extract(const char* file)
+	t_filestats Extract(const char* file)
 	{
 		UInt32 idx = FindFile(file);
-		if(inherited::Extract(&idx, 1, false, aec))
+		if(inherited::Extract(&idx, 1, false, aec) != S_OK)
 		{
 			throw exception_io_not_found();
 		}
+		return aec->Stat(idx);
 	}
 
 	t_filestats Stat(const char* file)
@@ -323,11 +316,10 @@ public:
 	{
 		service_ptr_t< file > m_file;
 		filesystem::g_open( m_file, p_archive, filesystem::open_mode_read, p_abort );
-		t_filetimestamp timestamp = m_file->get_timestamp( p_abort );
 
 		Archive7Z archive(m_file, p_abort);
-		archive.Extract(p_file);
-		p_out = new service_impl_t<reader_membuffer_simple>(archive.FileData().data(), archive.FileData().size(), timestamp, m_file->is_remote());
+		auto stat = archive.Extract(p_file);
+		p_out = new service_impl_t<reader_membuffer_simple>(archive.FileData().data(), archive.FileData().size(), stat.m_timestamp, m_file->is_remote());
 	}
 
 	virtual void archive_list( const char * path, const service_ptr_t< file > & p_reader, archive_callback & p_out, bool p_want_readers )
@@ -415,7 +407,7 @@ public:
 static archive_factory_t < archive_7z_ex >  g_archive_7z_ex_factory;
 static unpacker_factory_t< unpacker_7z_ex > g_unpacker_7z_ex_factory;
 
-DECLARE_COMPONENT_VERSION("7-ZIP Reader Ex", "0.01",
+DECLARE_COMPONENT_VERSION("7-ZIP Reader Ex", "0.0.2",
 "7-ZIP Reader Ex (C) 2017 by djdron\n"
 "https://github.com/djdron/foo_unpack_7z_ex\n\n"
 "Used C++ LZMA API which made possible to process huge solid archives\n"
